@@ -24,6 +24,7 @@ import {
   DUPLICATE_BLOCKED_ERROR,
 } from '@/lib/duplicate-protection';
 import { getGoogleApiCredentials, getRefreshedAccessToken } from '@/lib/google-drive-auth';
+import { adminFirestore, isAdminSDKAvailable } from '@/firebase/admin';
 
 // Social API Logic
 const INSTAGRAM_GRAPH_API_URL = 'https://graph.instagram.com/v20.0';
@@ -622,14 +623,19 @@ const googleDriveSettingsSchema = z.object({
 
 export async function getGoogleDriveSettings() {
     try {
-        const settingsRef = doc(galleryFirestore, 'settings', 'googleDrive');
-        const docSnap = await getDoc(settingsRef);
-
-        if (docSnap.exists()) {
-            return { success: true, settings: docSnap.data(), error: null };
+        let data: Record<string, unknown> | null = null;
+        if (isAdminSDKAvailable() && adminFirestore) {
+            const docSnap = await adminFirestore.collection('settings').doc('googleDrive').get();
+            data = docSnap.exists ? (docSnap.data() as Record<string, unknown>) : null;
         } else {
-            return { success: true, settings: null, error: 'No Google Drive settings found.' };
+            const settingsRef = doc(galleryFirestore, 'settings', 'googleDrive');
+            const docSnap = await getDoc(settingsRef);
+            data = docSnap.exists() ? docSnap.data() : null;
         }
+        if (data) {
+            return { success: true, settings: data, error: null };
+        }
+        return { success: true, settings: null, error: 'No Google Drive settings found.' };
     } catch (e: any) {
         console.error('[ACTION_ERROR] getGoogleDriveSettings:', e);
         return { success: false, settings: null, error: e.message };
@@ -645,9 +651,14 @@ export async function saveGoogleDriveSettings(prevState: any, formData: FormData
     }
 
     try {
-        const settingsRef = doc(galleryFirestore, 'settings', 'googleDrive');
-        await setDoc(settingsRef, validated.data, { merge: true });
-        
+        // Use Admin SDK when available (Vercel/server) so write bypasses Firestore rules
+        if (isAdminSDKAvailable() && adminFirestore) {
+            await adminFirestore.collection('settings').doc('googleDrive').set(validated.data, { merge: true });
+        } else {
+            const settingsRef = doc(galleryFirestore, 'settings', 'googleDrive');
+            await setDoc(settingsRef, validated.data, { merge: true });
+        }
+
         revalidatePath('/dashboard/settings');
         return { success: true, message: 'Google Drive settings saved successfully!' };
 
