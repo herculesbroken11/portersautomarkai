@@ -1,7 +1,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
-import { doc, getDoc, collection, writeBatch, query, where, getDocs, limit, orderBy } from 'firebase/firestore';
+import { doc, collection, writeBatch, query, where, getDocs, limit } from 'firebase/firestore';
 import { galleryFirestore, storage } from '@/firebase/config';
+import { adminFirestore, isAdminSDKAvailable } from '@/firebase/admin';
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { generateCaptions as generateReplicateCaptions } from '@/ai/replicate';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
@@ -103,9 +104,17 @@ export async function GET(request: NextRequest) {
                     const videoData = await videoRes.json();
                     if (videoData.files && videoData.files.length > 0) {
                         // Check if this video has been processed
-                        const postExistsQuery = query(collection(galleryFirestore, 'posts'), where('originalDriveId', '==', videoData.files[0].id), limit(1));
-                        const postSnapshot = await getDocs(postExistsQuery);
-                        if (postSnapshot.empty) {
+                        const driveId = videoData.files[0].id;
+                        let alreadyProcessed = false;
+                        if (isAdminSDKAvailable() && adminFirestore) {
+                            const postSnap = await adminFirestore.collection('posts').where('originalDriveId', '==', driveId).limit(1).get();
+                            alreadyProcessed = !postSnap.empty;
+                        } else {
+                            const postExistsQuery = query(collection(galleryFirestore, 'posts'), where('originalDriveId', '==', driveId), limit(1));
+                            const postSnapshot = await getDocs(postExistsQuery);
+                            alreadyProcessed = !postSnapshot.empty;
+                        }
+                        if (!alreadyProcessed) {
                             latestVideo = videoData.files[0];
                             foundInFolderId = folder.id;
                             break;
@@ -147,22 +156,39 @@ export async function GET(request: NextRequest) {
                 send({ log: "Upload complete."});
 
                 // Save to Firestore
-                const batch = writeBatch(galleryFirestore);
-                for (const post of captions) {
-                    const newPostRef = doc(collection(galleryFirestore, 'posts'));
-                    batch.set(newPostRef, {
-                        videoUrl: downloadURL,
-                        platform: post.platform,
-                        status: 'pending',
-                        createdAt: new Date().toISOString(),
-                        vehicle: vehicleName,
-                        service: 'Video Showcase',
-                        text: post.text,
-                        hashtags: post.hashtags || [],
-                        originalDriveId: latestVideo.id, // Keep track of processed files
-                    });
+                const postPayload = {
+                    videoUrl: downloadURL,
+                    status: 'pending',
+                    createdAt: new Date().toISOString(),
+                    vehicle: vehicleName,
+                    service: 'Video Showcase',
+                    originalDriveId: latestVideo.id,
+                };
+                if (isAdminSDKAvailable() && adminFirestore) {
+                    const batch = adminFirestore.batch();
+                    for (const post of captions) {
+                        const newPostRef = adminFirestore.collection('posts').doc();
+                        batch.set(newPostRef, {
+                            ...postPayload,
+                            platform: post.platform,
+                            text: post.text,
+                            hashtags: post.hashtags || [],
+                        });
+                    }
+                    await batch.commit();
+                } else {
+                    const batch = writeBatch(galleryFirestore);
+                    for (const post of captions) {
+                        const newPostRef = doc(collection(galleryFirestore, 'posts'));
+                        batch.set(newPostRef, {
+                            ...postPayload,
+                            platform: post.platform,
+                            text: post.text,
+                            hashtags: post.hashtags || [],
+                        });
+                    }
+                    await batch.commit();
                 }
-                await batch.commit();
                 send({ log: `Successfully saved ${captions.length} posts for approval.`});
 
                 send({ log: "Process complete!" });

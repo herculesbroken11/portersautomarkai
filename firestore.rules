@@ -159,6 +159,10 @@ service cloud.firestore {
       allow write: if isAuthenticated();
     }
     
+    match /paired_images/{document} {
+      allow read, write: if isAuthenticated();
+    }
+    
     match /drive_scan_state/{document} {
       allow read: if isAuthenticated();
       allow write: if isAuthenticated();

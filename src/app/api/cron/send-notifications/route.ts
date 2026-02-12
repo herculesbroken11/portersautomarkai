@@ -1,8 +1,8 @@
 
-
 import { NextResponse } from 'next/server';
-import { collection, query, where, getDocs, updateDoc, doc, getDoc, Timestamp, limit } from 'firebase/firestore';
+import { collection, query, where, getDocs, updateDoc, doc, getDoc, limit } from 'firebase/firestore';
 import { galleryFirestore } from '@/firebase/config';
+import { adminFirestore, isAdminSDKAvailable } from '@/firebase/admin';
 import { sendEmail } from '@/lib/email';
 // import Twilio from 'twilio'; // STEP 1: Uncomment this after running `npm install twilio`
 
@@ -18,6 +18,13 @@ function checkAuth(request: Request) {
 // Fetches Twilio settings from Firestore
 async function getTwilioConfig() {
     try {
+        if (isAdminSDKAvailable() && adminFirestore) {
+            const docSnap = await adminFirestore.collection('settings').doc('twilio').get();
+            if (docSnap.exists) {
+                return docSnap.data();
+            }
+            return null;
+        }
         const settingsRef = doc(galleryFirestore, 'settings', 'twilio');
         const docSnap = await getDoc(settingsRef);
         if (docSnap.exists()) {
@@ -41,26 +48,34 @@ export async function GET(request: Request) {
     try {
         logs.push('Cron job started: Sending pending notifications...');
 
-        // Fetch configs
         const twilioConfig = await getTwilioConfig();
-        const notificationsRef = collection(galleryFirestore, 'enginenotifications');
 
-        // --- Anti-Spam: Send only one notification per run to distribute load ---
-        const q = query(
-            notificationsRef,
-            where('status', '==', 'pending'),
-            limit(1) // Process one notification at a time.
-        );
+        let notificationDoc: { id: string; data: () => Record<string, unknown> } | null = null;
+        if (isAdminSDKAvailable() && adminFirestore) {
+            const snap = await adminFirestore.collection('enginenotifications')
+                .where('status', '==', 'pending')
+                .limit(1)
+                .get();
+            if (!snap.empty) {
+                const d = snap.docs[0];
+                notificationDoc = { id: d.id, data: d.data };
+            }
+        } else {
+            const notificationsRef = collection(galleryFirestore, 'enginenotifications');
+            const q = query(notificationsRef, where('status', '==', 'pending'), limit(1));
+            const querySnapshot = await getDocs(q);
+            if (!querySnapshot.empty) {
+                const d = querySnapshot.docs[0];
+                notificationDoc = { id: d.id, data: d.data };
+            }
+        }
 
-        const querySnapshot = await getDocs(q);
-
-        if (querySnapshot.empty) {
+        if (!notificationDoc) {
             logs.push('No pending notifications found to send.');
             return NextResponse.json({ message: 'No pending notifications found.', logs });
         }
 
-        const notificationDoc = querySnapshot.docs[0];
-        const notification = { id: notificationDoc.id, ...notificationDoc.data() };
+        const notification = { id: notificationDoc.id, ...notificationDoc.data() } as Record<string, unknown>;
         logs.push(`Processing notification ${notification.id} for ${notification.customerEmail}`);
         
         let emailSent = false;
@@ -121,12 +136,17 @@ export async function GET(request: Request) {
             }
 
             // 3. Update the notification status in Firestore
-            const notificationRef = doc(galleryFirestore, 'enginenotifications', notification.id);
-            await updateDoc(notificationRef, {
+            const updateData = {
                 status: finalStatus,
                 sentAt: new Date().toISOString(),
                 ...(errors.length > 0 && { error: errors.join('; ') })
-            });
+            };
+            if (isAdminSDKAvailable() && adminFirestore) {
+                await adminFirestore.collection('enginenotifications').doc(notification.id).update(updateData);
+            } else {
+                const notificationRef = doc(galleryFirestore, 'enginenotifications', notification.id);
+                await updateDoc(notificationRef, updateData);
+            }
 
             const summary = `Notification processing complete for ${notification.id}. Final status: ${finalStatus}.`;
             logs.push(summary);
@@ -134,11 +154,13 @@ export async function GET(request: Request) {
 
         } catch (emailError: any) {
             logs.push(`[FAILURE] Failed to send email to ${notification.customerEmail}: ${emailError.message}`);
-            const notificationRef = doc(galleryFirestore, 'enginenotifications', notification.id);
-            await updateDoc(notificationRef, {
-                status: 'failed',
-                error: emailError.message,
-            });
+            const failData = { status: 'failed', error: emailError.message };
+            if (isAdminSDKAvailable() && adminFirestore) {
+                await adminFirestore.collection('enginenotifications').doc(notification.id).update(failData);
+            } else {
+                const notificationRef = doc(galleryFirestore, 'enginenotifications', notification.id);
+                await updateDoc(notificationRef, failData);
+            }
             return NextResponse.json({ error: `Failed to send notification ${notification.id}.`, logs }, { status: 500 });
         }
 

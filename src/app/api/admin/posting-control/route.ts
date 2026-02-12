@@ -49,9 +49,24 @@ export async function GET(request: NextRequest) {
 /**
  * POST - Update posting control status (pause/resume)
  * Body: { posting_paused: boolean, paused_reason?: string, actor?: string }
+ * In production, send Authorization: Bearer <ADMIN_SECRET> or x-admin-secret: <ADMIN_SECRET> if ADMIN_SECRET is set in env.
  */
 export async function POST(request: NextRequest) {
   try {
+    const adminSecret = process.env.ADMIN_SECRET;
+    if (adminSecret) {
+      const authHeader = request.headers.get('authorization') || '';
+      const bearerToken = authHeader.split('Bearer ').at(1)?.trim();
+      const headerSecret = request.headers.get('x-admin-secret')?.trim();
+      const provided = bearerToken || headerSecret;
+      if (provided !== adminSecret) {
+        return NextResponse.json(
+          { error: 'Forbidden', message: 'Missing or invalid admin authorization. Send Authorization: Bearer <ADMIN_SECRET> or x-admin-secret: <ADMIN_SECRET>.' },
+          { status: 403 }
+        );
+      }
+    }
+
     if (!isAdminSDKAvailable() || !adminFirestore) {
       return NextResponse.json(
         { error: 'Firebase Admin SDK not configured', message: 'Set GOOGLE_APPLICATION_CREDENTIALS or FIREBASE_ADMIN_SERVICE_ACCOUNT' },
